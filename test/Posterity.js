@@ -62,7 +62,7 @@ describe("Posterity", function () {
 
     it("Should set the right root hash", async function () {
       const { posterity, rootHash } = await loadFixture(deployLocalSociety);
-      expect(await posterity.merkleRoot()).to.equal(`0x${rootHash}`);
+      expect(await posterity.generationMerkleRoot()).to.equal(`0x${rootHash}`);
     });
   });
 
@@ -70,8 +70,6 @@ describe("Posterity", function () {
     it("Should claim the settler tokens", async function () {
       const { posterity, owner, merkleTree } = await loadFixture(deployLocalSociety);
 
-
-      // make sure a bad proof fails
       let proof = merkleTree.getProof(keccak256(owner.address)).map(p => p.data)
       proof[0] = keccak256(proof[0])
       await expect(posterity.claim(owner.address, proof)).to.be.revertedWith("Posterity::claim: Invalid proof of permission to settle.")
@@ -82,6 +80,9 @@ describe("Posterity", function () {
       expect(await posterity.balanceOf(owner.address)).to.equal(100)
 
       await expect(posterity.claim(owner.address, proof)).to.be.revertedWith("Posterity::claim: molecule is already alive.")
+    
+      expect(await posterity.getState(1, owner.address)).to.equal(1)
+      expect(await posterity.getLastBalanced(1, owner.address)).to.equal(0)
     });
   });
 
@@ -108,6 +109,8 @@ describe("Posterity", function () {
 
       expect(await posterity.balanceOf(owner.address)).to.equal(0)
       expect(await posterity.balanceOf(otherAccount.address)).to.equal(100)
+
+      expect(await posterity.getLastBalanced(1, owner.address)).to.not.equal(0)
     });
   });
 });

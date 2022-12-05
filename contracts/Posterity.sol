@@ -3,10 +3,9 @@
 pragma solidity ^0.8.17;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {Generations} from "./Generations.sol";
 
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
-
-import {Generations} from "./Generations.sol";
 
 /**
  * @notice Posterity is an abstract that provides a mechanism implements local societal obligation to keep the
@@ -14,7 +13,7 @@ import {Generations} from "./Generations.sol";
  *         every individual lacks directly impact on the continuation of the network. Posterity is a mechanism that
  *         allows individuals to directly impact the continuation of the network by providing a mechanism to
  *         incentivize the continuation of the network.
- * @author @0x446575* | @nftchance+
+ * @author @0x446576* | @nftchance+
  */
 contract Posterity is ERC20, Generations {
     //////////////////////////////////////////////////////////////
@@ -59,7 +58,7 @@ contract Posterity is ERC20, Generations {
         require(
             MerkleProof.verify(
                 _merkleProof,
-                merkleRoot,
+                generationMerkleRoot,
                 keccak256(abi.encodePacked(_molecule))
             ),
             "Posterity::claim: Invalid proof of permission to settle."

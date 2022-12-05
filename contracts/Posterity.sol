@@ -7,6 +7,8 @@ import {Generations} from "./Generations.sol";
 
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
+import "hardhat/console.sol";
+
 /**
  * @notice Posterity is an abstract that provides a mechanism implements local societal obligation to keep the
  *         networking growing. Lost knowledge and the erosion of mind-share has led to a global society in which
@@ -23,14 +25,16 @@ contract Posterity is ERC20, Generations {
     constructor(
         string memory _name,
         string memory _symbol,
-        uint32 _generationCapacity,
-        uint32 _generationDecayRate,
+        uint96 _generationCapacity,
+        uint96 _generationDecayRate,
+        uint96 _generationBaseKnowledgeLossRate,
         bytes32 _merkleRoot
     ) ERC20(_name, _symbol) {
         setGeneration(
             1,
             _generationCapacity,
             _generationDecayRate,
+            _generationBaseKnowledgeLossRate,
             _merkleRoot
         );
     }
@@ -65,17 +69,7 @@ contract Posterity is ERC20, Generations {
         );
 
         /// @dev Mint the capacity for new knowledge and mind-share.
-        _mint(_molecule, getGenerationCapacity(generationInterval));
-    }
-
-    /**
-     * @notice Burn tokens for a participant.
-     * @dev Decay is not calculated prior to the burn, so the decay is not
-     *      included in the burn.
-     * @param _amount The amount of tokens to burn.
-     */
-    function burn(uint256 _amount) public virtual {
-        _burn(_msgSender(), _amount);
+        _mint(_molecule, 1);
     }
 
     //////////////////////////////////////////////////////////////
@@ -93,14 +87,22 @@ contract Posterity is ERC20, Generations {
         address _to,
         uint256 _amount
     ) internal virtual {
+        /// @dev Move the value in a cheaper access pattern.
+        uint256 balance = balanceOf(_to);
+
         /// @dev Require that the knowledge transfer can only be performed once per interval.
         require(
-            getState(generationInterval, _to) < 2,
+            getState(
+                generationInterval,
+                _to,
+                balance,
+                balance == 0 ? 0 : getKnowledgeDecay(_to)
+            ) < 2,
             "Posterity::_knowledgeTransfer: Cannot house knowledge in a carcass."
         );
 
         /// @dev Move the value in a cheaper access pattern.
-        uint256 balance = balanceOf(_from);
+        balance = balanceOf(_from);
 
         /// @dev Require that only 1 or the full balance may be transferred.
         /// @notice Implementation of the 1% rule for knowledge transfer and growth.
@@ -118,35 +120,30 @@ contract Posterity is ERC20, Generations {
         uint256 cost = _amount == balance ? 0 : getKnowledgeErosion(_amount);
 
         if (decay + cost > 0) {
+            require(
+                balance >= _amount + decay + cost,
+                "Posterity::_setKnowledge: too much knowledge to transfer."
+            );
+
             /// @dev Update the decay of the held knowledge before any transfer can take place.
             _setLastBalanced(generationInterval, _from);
 
             /// @dev Update the state after decay of the held knowledge before any
             ///      transfer can take place.
-            unchecked {
-                balance -= cost + decay;
-            }
+            _burn(_from, decay + cost);
 
             /// @dev Update the decay of the recipient.
             emit Transfer(_from, address(0), decay + cost);
         }
-
-        /// @dev Handle the seeding of a new molecule.
-        if (_amount == 1) {
-            /// @dev Mint the new knowledge and mind-share.
-            _mint(_to, getGenerationCapacity(generationInterval));
-        }
-
-        /// @dev Determine if the transfer is a shard or a full piece of knowledge and enforce
-        ///      the appropriate type of participant death.
-        uint256 generationalDeath = _amount == balance ? 0 : 1;
 
         /// @dev Record the death of society members (and their knowledge and mind-share) if
         ///      the transfer concludes the emission of knowledge share.
         _setState(
             generationInterval,
             _from,
-            balance == generationalDeath ? 2 : 1
+            _amount == balance
+                ? 2
+                : getState(generationInterval, _from, balance, _amount + decay + cost)
         );
     }
 
@@ -162,16 +159,35 @@ contract Posterity is ERC20, Generations {
         address _to,
         uint256 _amount
     ) internal virtual override {
-        /// @dev Determine if the knowledge is not associated with the zero address.
-        if (_from != address(0)) {
+        if (_to != address(0)) {
             /// @dev Handle the transfer of knowledge and mind-share.
-            _setKnowledge(_from, _to, _amount);
+            uint256 balance = balanceOf(_to);
+
+            /// @dev Record the birth of society members if the transfer seeds a new generation.
+            _setState(
+                generationInterval,
+                _to,
+                balance == 0
+                    ? 1
+                    : getState(
+                        generationInterval,
+                        _to,
+                        balance,
+                        getKnowledgeDecay(_to)
+                    )
+            );
+
+            /// @dev If the transfer is not a mint, update the senders knowledge state.
+            if (_from != address(0)) {
+                /// @dev Handle the transfer of knowledge and mind-share.
+                _setKnowledge(_from, _to, _amount);
+            }
+
+            /// @dev Handle the seeding of a new molecule.
+            if (_amount == 1) {
+                /// @dev Mint the new knowledge and mind-share.
+                _mint(_to, getGenerationCapacity(generationInterval));
+            }
         }
-
-        /// @dev Handle the transfer of knowledge and mind-share.
-        uint256 balance = balanceOf(_to);
-
-        /// @dev Record the birth of society members if the transfer seeds a new generation.
-        _setState(generationInterval, _to, balance == 0 ? 1 : 0);
     }
 }

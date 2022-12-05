@@ -4,6 +4,8 @@ pragma solidity ^0.8.17;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
+import "hardhat/console.sol";
+
 contract Generations is Ownable {
     //////////////////////////////////////////////////////////////
     ///                         STATE                          ///
@@ -19,7 +21,8 @@ contract Generations is Ownable {
     /// @dev The bitpacked targets value represents:
     /// @dev 0-31: The generational capacity for new members.
     /// @dev 32-63: The generational decay rate for members.
-    mapping(uint32 => uint64) public generation;
+    /// @dev 64-95: The base knowledge loss rate on transfer.
+    mapping(uint32 => uint96) public generation;
 
     /// @dev The state of the society running inside Posterity.
     /// @dev The nested uint maps to a bitpacked:
@@ -40,8 +43,9 @@ contract Generations is Ownable {
      */
     function setGeneration(
         uint32 _generationInterval,
-        uint64 _generationCapacity,
-        uint64 _generationDecayRate,
+        uint96 _generationCapacity,
+        uint96 _generationDecayRate,
+        uint96 _generationBaseKnowledgeLossRate,
         bytes32 _generationMerkleRoot
     ) public onlyOwner {
         /// @dev The generation interval must be taking society into the future.
@@ -58,16 +62,18 @@ contract Generations is Ownable {
 
         /// @dev Bitpack the generation capacity and decay rate.
         /// 01010101010101010101010101010101
-        /// |<--------- 32 bits ---------->|
-        /// 10101010101010101010101010101010
-        /// |<--------- 32 bits ---------->|
-        /// << 32 --> 0101010101010101010101010101010110101010101010101010101010101010
-        ///           |<--------- 32 bits ---------->|<--------- 32 bits ----------->|
-        /// | --> 0101010101010101010101010101010110101010101010101010101010101010
-        ///       |<----------------------- 64 bits ---------------------------->|
+        /// |<---------- 32 bits --------->|
+        /// 11111111111111111111111111111111
+        /// |<---------- 32 bits --------->|
+        /// 00000000000000000000000000000000
+        /// |<---------- 32 bits --------->|
+        /// 0101010101|1111111111|0000000000
+        /// |<- 32 -->||<- 32 -->||<- 32 ->|
+        /// |<---------- 96 bits --------->|
         generation[_generationInterval] =
             _generationCapacity |
-            (_generationDecayRate << 32);
+            (_generationDecayRate << 32) |
+            (_generationBaseKnowledgeLossRate << 64);
     }
 
     //////////////////////////////////////////////////////////////
@@ -87,7 +93,16 @@ contract Generations is Ownable {
         returns (uint32)
     {
         /// @dev Return the first 32 bits of the generation.
-        /// No bitmap mask or shift is needed due to packing normalization.
+        /// 01010101010101010101010101010101
+        /// |<---------- 32 bits --------->|
+        /// 11111111111111111111111111111111
+        /// |<---------- 32 bits --------->|
+        /// 00000000000000000000000000000000
+        /// |<---------- 32 bits --------->|
+        /// 0101010101|1111111111|0000000000
+        /// |<- 32 -->||<- 32 -->||<- 32 ->|
+        /// 00000000000000000000000000000000
+        /// |<---------- 32 bits --------->|
         return uint32(generation[_generationInterval]);
     }
 
@@ -104,15 +119,37 @@ contract Generations is Ownable {
         returns (uint32)
     {
         /// @dev Shift the decay rate to the right by 32 bits and trim to 32 bits.
+        /// 01010101010101010101010101010101
+        /// |<---------- 32 bits --------->|
         /// 11111111111111111111111111111111
         /// |<---------- 32 bits --------->|
         /// 00000000000000000000000000000000
         /// |<---------- 32 bits --------->|
-        /// 11111111111111111111111111111111|00000000000000000000000000000000
-        /// |<------------------------ 64 bits ---------------------------->|
-        /// >> 32 --> 11111111111111111111111111111111
+        /// 0101010101|1111111111|0000000000
+        /// |<- 32 -->||<- 32 -->||<- 32 ->|
+        /// >> 64 --> 11111111111111111111111111111111
         ///           |<---------- 32 bits --------->|
         return uint32(generation[_generationInterval] >> 32);
+    }
+
+    function getGenerationBaseKnowledgeLossRate(uint32 _generationInterval)
+        public
+        view
+        virtual
+        returns (uint32)
+    {
+        /// @dev Shift the decay rate to the right by 64 bits and trim to 32 bits.
+        /// 01010101010101010101010101010101
+        /// |<---------- 32 bits --------->|
+        /// 11111111111111111111111111111111
+        /// |<---------- 32 bits --------->|
+        /// 00000000000000000000000000000000
+        /// |<---------- 32 bits --------->|
+        /// 0101010101|1111111111|0000000000
+        /// |<- 32 -->||<- 32 -->||<- 32 ->|
+        /// >> 64 --> 01010101010101010101010101010101
+        ///           |<---------- 32 bits --------->|
+        return uint32(generation[_generationInterval] >> 64);
     }
 
     /**
@@ -121,12 +158,28 @@ contract Generations is Ownable {
      * @param _molecule The society member to query.
      * @return The state of the queried society molecule.
      */
-    function getState(uint32 _generationInterval, address _molecule)
-        public
-        view
-        virtual
-        returns (uint32)
-    {
+    function getState(
+        uint32 _generationInterval,
+        address _molecule
+    ) public view virtual returns (uint8) {
+        /// @dev Return the first 2 bits of the knowledge fit into 8.
+        return getState(_generationInterval, _molecule, 0, 0);
+    }
+
+    /**
+     * @notice (Overloaded) Returns the state of a molecule in a generation.
+     * @param _generationInterval The generation interval.
+     * @param _molecule The society member to query.
+     * @param _balance The balance of the society member.
+     * @param _requiredBalance The required balance of the society member.
+     * @return The state of the queried society molecule.
+     */
+    function getState(
+        uint32 _generationInterval,
+        address _molecule,
+        uint256 _balance,
+        uint256 _requiredBalance
+    ) public view virtual returns (uint8) {
         /// @dev Mask the number with 0b11 (0x3) to get the first 2 bits.
         /// 11111111111111111111111111111111
         /// |<---------- 32 bits --------->|
@@ -136,7 +189,9 @@ contract Generations is Ownable {
         /// |<---------- 32 bits ---------->|-| <-- 2 bits
         /// & 0x3 --> 01
         ///           || <-- 2 bits
-        return uint32(knowledge[_generationInterval][_molecule] & 0x3);
+        if(_balance < _requiredBalance) return 2;
+
+        return uint8(knowledge[_generationInterval][_molecule] & 0x3);
     }
 
     /**
@@ -163,7 +218,7 @@ contract Generations is Ownable {
     }
 
     /**
-     * @notice Returns the amount of knowledge that has been lost by a 
+     * @notice Returns the amount of knowledge that has been lost by a
      *         molecule since the last balance.
      * @param _molecule The society member to query.
      * @return decay The amount of knowledge lost by the molecule.
@@ -177,12 +232,12 @@ contract Generations is Ownable {
         /// @dev Determine the amount of time that has passed since the last balance
         ///      and decay the knowledge accordingly.
         decay =
-            (block.timestamp - getLastBalanced(generationInterval, _molecule)) /
+            (block.number - getLastBalanced(generationInterval, _molecule)) /
             getGenerationDecayRate(generationInterval);
     }
 
     /**
-     * @notice Returns the amount of knowledge that erodes when transferring 
+     * @notice Returns the amount of knowledge that erodes when transferring
      *         the provided amount of knowledge.
      * @param _amount The amount of knowledge to transfer.
      * @return amount The amount of knowledge that erodes.
@@ -193,7 +248,8 @@ contract Generations is Ownable {
         virtual
         returns (uint256 amount)
     {
-        amount = _amount;
+        _amount;
+        amount = getGenerationBaseKnowledgeLossRate(generationInterval);
     }
 
     //////////////////////////////////////////////////////////////
@@ -247,7 +303,7 @@ contract Generations is Ownable {
         /// 0101010101010101010101010101010111
         /// |<---------- 34 bits ----------->|
         knowledge[_generationInterval][_molecule] = uint48(
-            getState(_generationInterval, _molecule) | (block.timestamp << 2)
+            getState(_generationInterval, _molecule) | (block.number << 2)
         );
     }
 }

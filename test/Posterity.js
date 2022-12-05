@@ -13,6 +13,7 @@ describe("Posterity", function () {
     const symbol = "LS"
     const generationCapacity = 100
     const generationDecayRate = 604800
+    const generationBaseKnowledgeLossRate = 1
 
     const [owner, otherAccount] = await ethers.getSigners();
 
@@ -28,6 +29,7 @@ describe("Posterity", function () {
       symbol,
       generationCapacity,
       generationDecayRate,
+      generationBaseKnowledgeLossRate,
       `0x${rootHash}`
     );
 
@@ -77,26 +79,14 @@ describe("Posterity", function () {
       proof = merkleTree.getProof(keccak256(owner.address)).map(p => p.data)
 
       await posterity.claim(owner.address, proof)
-      expect(await posterity.balanceOf(owner.address)).to.equal(100)
+      expect(await posterity.balanceOf(owner.address)).to.equal(101)
 
       await expect(posterity.claim(owner.address, proof)).to.be.revertedWith("Posterity::claim: molecule is already alive.")
-    
-      expect(await posterity.getState(1, owner.address)).to.equal(1)
+
+      expect(await posterity["getState(uint32,address)"](1, owner.address)).to.equal(1)
       expect(await posterity.getLastBalanced(1, owner.address)).to.equal(0)
     });
   });
-
-  describe("Burning", function () {
-    it("Should burn all the settler tokens", async function () {
-      const { posterity, owner, merkleTree } = await loadFixture(deployLocalSociety);
-      let proof = merkleTree.getProof(keccak256(owner.address)).map(p => p.data)
-
-      await posterity.claim(owner.address, proof)
-      expect(await posterity.balanceOf(owner.address)).to.equal(100)
-      await posterity.burn(100)
-      expect(await posterity.balanceOf(owner.address)).to.equal(0)
-    });
-  })
 
   describe("Transfering", function () {
     it("Should transfer full amount of knowledge to another recipient", async function () {
@@ -104,13 +94,55 @@ describe("Posterity", function () {
       let proof = merkleTree.getProof(keccak256(owner.address)).map(p => p.data)
 
       await posterity.claim(owner.address, proof)
-      expect(await posterity.balanceOf(owner.address)).to.equal(100)
-      await posterity.transfer(otherAccount.address, 100)
+      expect(await posterity.balanceOf(owner.address)).to.equal(101)
+      await posterity.transfer(otherAccount.address, 101)
+      expect(await posterity["getState(uint32,address)"](1, owner.address)).to.equal(2)
 
       expect(await posterity.balanceOf(owner.address)).to.equal(0)
-      expect(await posterity.balanceOf(otherAccount.address)).to.equal(100)
-
-      expect(await posterity.getLastBalanced(1, owner.address)).to.not.equal(0)
+      expect(await posterity.balanceOf(otherAccount.address)).to.equal(101)
     });
+
+    it("Should birth new member with single transfer", async function () {
+      const { posterity, owner, otherAccount, merkleTree } = await loadFixture(deployLocalSociety);
+      let proof = merkleTree.getProof(keccak256(owner.address)).map(p => p.data)
+
+      // claim the settler tokens
+      await posterity.claim(owner.address, proof)
+      expect(await posterity.balanceOf(owner.address)).to.equal(101)
+      expect(await posterity["getState(uint32,address)"](1, owner.address)).to.equal(1)
+      await posterity.transfer(otherAccount.address, 1)
+      expect(await posterity["getState(uint32,address)"](1, owner.address)).to.equal(1)
+
+      // pays the cost of the knowledge share
+      let cost = 2
+      expect(await posterity.balanceOf(owner.address)).to.equal(101 - cost)
+
+      // receives the knowledge share and is spawned with their own capacity
+      expect(await posterity.balanceOf(otherAccount.address)).to.equal(101)
+      expect(await posterity.getLastBalanced(1, owner.address)).to.not.equal(0)
+      expect(await posterity["getState(uint32,address)"](1, owner.address)).to.equal(1)
+    })
+
+    it("Should handle decay before transfer", async function () {
+      const { posterity, owner, otherAccount, merkleTree } = await loadFixture(deployLocalSociety);
+      let proof = merkleTree.getProof(keccak256(owner.address)).map(p => p.data)
+
+      // claim the settler tokens
+      await posterity.claim(owner.address, proof)
+      expect(await posterity.balanceOf(owner.address)).to.equal(101)
+
+      // go 2000 blocks in the future using hardhat
+      await time.advanceBlockTo(10000000000)
+      const knowledgeDecay = await posterity.getKnowledgeDecay(owner.address)
+      expect(knowledgeDecay).to.gt(10000)
+
+      await expect(posterity.transfer(otherAccount.address, 101)).to.be.revertedWith("Posterity::_setKnowledge: too much knowledge to transfer.")
+
+      // cannot claim as another account and refill the dead account
+      proof = merkleTree.getProof(keccak256(otherAccount.address)).map(p => p.data)
+      await posterity.connect(otherAccount).claim(otherAccount.address, proof)
+      expect(await posterity.balanceOf(otherAccount.address)).to.equal(101)
+      await expect(posterity.connect(otherAccount).transfer(owner.address, 101)).to.be.revertedWith("Posterity::_knowledgeTransfer: Cannot house knowledge in a carcass.")
+    })
   });
 });

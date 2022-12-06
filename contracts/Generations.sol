@@ -1,15 +1,28 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 pragma solidity ^0.8.17;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-
-import "hardhat/console.sol";
+import {PRBMathSD59x18} from "prb-math/contracts/PRBMathSD59x18.sol";
 
 contract Generations is Ownable {
+    using PRBMathSD59x18 for int256;
+
     //////////////////////////////////////////////////////////////
     ///                         STATE                          ///
     //////////////////////////////////////////////////////////////
+
+    ///@notice parameter that controls initial price, stored as a 59x18 fixed precision number
+    int256 internal immutable initialPrice;
+
+    ///@notice parameter that controls price decay, stored as a 59x18 fixed precision number
+    int256 internal immutable decayConstant;
+
+    ///@notice emission rate, in tokens per second, stored as a 59x18 fixed precision number
+    int256 internal immutable emissionRate;
+
+    ///@notice start time for last available auction, stored as a 59x18 fixed precision number
+    int256 internal lastBirth;
 
     /// @dev The active society epoch.
     uint32 public generationInterval;
@@ -31,6 +44,33 @@ contract Generations is Ownable {
     mapping(uint32 => mapping(address => uint48)) public knowledge;
 
     //////////////////////////////////////////////////////////////
+    ///                      CONSTRUCTOR                       ///
+    //////////////////////////////////////////////////////////////
+
+    constructor(
+        int256 _initialPrice,
+        int256 _decayConstant,
+        int256 _emissionRate,
+        uint96 _generationConfiguration,
+        bytes32 _merkleRoot
+    ) {
+        /// @dev Set the initial price.
+        initialPrice = _initialPrice;
+
+        /// @dev Set the decay constant.
+        decayConstant = _decayConstant;
+
+        /// @dev Set the emission rate.
+        emissionRate = _emissionRate;
+
+        /// @dev Set the last birth.
+        lastBirth = int256(block.timestamp).fromInt();
+
+        /// @dev Set the generation interval.
+        setGeneration(1, _generationConfiguration, _merkleRoot);
+    }
+
+    //////////////////////////////////////////////////////////////
     ///                        SETTERS                         ///
     //////////////////////////////////////////////////////////////
 
@@ -38,14 +78,12 @@ contract Generations is Ownable {
      * @notice Allows a society to roll into a new state.
      * @dev This is not really expected to be used by the owner, but rather by the society itself.
      * @param _generationInterval The new generation interval.
-     * @param _generationCapacity The new generation capacity.
-     * @param _generationDecayRate The new generation decay rate.
+     * @param _generationConfiguration The new generation configuration.
+     * @param _generationMerkleRoot The new generation merkle root for settlers.
      */
     function setGeneration(
         uint32 _generationInterval,
-        uint96 _generationCapacity,
-        uint96 _generationDecayRate,
-        uint96 _generationBaseKnowledgeLossRate,
+        uint96 _generationConfiguration,
         bytes32 _generationMerkleRoot
     ) public onlyOwner {
         /// @dev The generation interval must be taking society into the future.
@@ -60,7 +98,7 @@ contract Generations is Ownable {
         /// @dev Set the new merkle root for settler claims.
         generationMerkleRoot = _generationMerkleRoot;
 
-        /// @dev Bitpack the generation capacity and decay rate.
+        /// @dev Uses an already bitpacked value to set the generation configuration.
         /// 01010101010101010101010101010101
         /// |<---------- 32 bits --------->|
         /// 11111111111111111111111111111111
@@ -70,10 +108,7 @@ contract Generations is Ownable {
         /// 0101010101|1111111111|0000000000
         /// |<- 32 -->||<- 32 -->||<- 32 ->|
         /// |<---------- 96 bits --------->|
-        generation[_generationInterval] =
-            _generationCapacity |
-            (_generationDecayRate << 32) |
-            (_generationBaseKnowledgeLossRate << 64);
+        generation[_generationInterval] = _generationConfiguration;
     }
 
     //////////////////////////////////////////////////////////////
@@ -158,10 +193,12 @@ contract Generations is Ownable {
      * @param _molecule The society member to query.
      * @return The state of the queried society molecule.
      */
-    function getState(
-        uint32 _generationInterval,
-        address _molecule
-    ) public view virtual returns (uint8) {
+    function getState(uint32 _generationInterval, address _molecule)
+        public
+        view
+        virtual
+        returns (uint8)
+    {
         /// @dev Return the first 2 bits of the knowledge fit into 8.
         return getState(_generationInterval, _molecule, 0, 0);
     }
@@ -189,7 +226,7 @@ contract Generations is Ownable {
         /// |<---------- 32 bits ---------->|-| <-- 2 bits
         /// & 0x3 --> 01
         ///           || <-- 2 bits
-        if(_balance < _requiredBalance) return 2;
+        if (_balance < _requiredBalance) return 2;
 
         return uint8(knowledge[_generationInterval][_molecule] & 0x3);
     }
@@ -239,17 +276,41 @@ contract Generations is Ownable {
     /**
      * @notice Returns the amount of knowledge that erodes when transferring
      *         the provided amount of knowledge.
+     * @dev Implements the knowledge eroding function:
+     *      $P(q)=\frac{k}{\lambda} \cdot \frac{e^{\frac{\lambda q}{r}}-1}{e^{\lambda T}}$
      * @param _amount The amount of knowledge to transfer.
-     * @return amount The amount of knowledge that erodes.
+     * @return erosion The amount of knowledge that erodes.
      */
     function getKnowledgeErosion(uint256 _amount)
         public
         view
         virtual
-        returns (uint256 amount)
+        returns (uint256 erosion)
     {
-        _amount;
-        amount = getGenerationBaseKnowledgeLossRate(generationInterval);
+        /// @dev Convert the amount of knowledge to a fixed point number.
+        int256 amount = int256(_amount).fromInt();
+
+        /// @dev Determine the amount of time that has passed since the last birth.
+        int256 timeSinceLastAuctionStart = int256(block.timestamp).fromInt() -
+            lastBirth;
+
+        /// @dev Calculate the left side of the equation.
+        int256 num1 = initialPrice.div(decayConstant);
+
+        /// @dev Calculate the right side of the equation.
+        int256 num2 = decayConstant.mul(amount).div(emissionRate).exp() -
+            PRBMathSD59x18.fromInt(1);
+
+        /// @dev Find the point in the curve.
+        int256 den = decayConstant.mul(timeSinceLastAuctionStart).exp();
+
+        /// @dev Calculate the erosion.
+        int256 totalCost = num1.mul(num2).div(den);
+
+        /// @dev Return the dynamic cost of erosion + the societies fixed cost.
+        erosion =
+            uint256(totalCost) +
+            getGenerationBaseKnowledgeLossRate(generationInterval);
     }
 
     //////////////////////////////////////////////////////////////

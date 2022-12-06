@@ -1,13 +1,12 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: AGPL-3.0-or-later
 
 pragma solidity ^0.8.17;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {Generations} from "./Generations.sol";
+import {PRBMathSD59x18} from "prb-math/contracts/PRBMathSD59x18.sol";
 
 import {MerkleProof} from "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
-
-import "hardhat/console.sol";
 
 /**
  * @notice Posterity is an abstract that provides a mechanism implements local societal obligation to keep the
@@ -18,6 +17,8 @@ import "hardhat/console.sol";
  * @author @0x446576* | @nftchance+
  */
 contract Posterity is ERC20, Generations {
+    using PRBMathSD59x18 for int256;
+
     //////////////////////////////////////////////////////////////
     ///                      CONSTRUCTOR                       ///
     //////////////////////////////////////////////////////////////
@@ -25,19 +26,21 @@ contract Posterity is ERC20, Generations {
     constructor(
         string memory _name,
         string memory _symbol,
-        uint96 _generationCapacity,
-        uint96 _generationDecayRate,
-        uint96 _generationBaseKnowledgeLossRate,
+        int256 _initialPrice,
+        int256 _decayConstant,
+        int256 _emissionRate,
+        uint96 _generationConfiguration,
         bytes32 _merkleRoot
-    ) ERC20(_name, _symbol) {
-        setGeneration(
-            1,
-            _generationCapacity,
-            _generationDecayRate,
-            _generationBaseKnowledgeLossRate,
+    )
+        ERC20(_name, _symbol)
+        Generations(
+            _initialPrice,
+            _decayConstant,
+            _emissionRate,
+            _generationConfiguration,
             _merkleRoot
-        );
-    }
+        )
+    {}
 
     //////////////////////////////////////////////////////////////
     ///                        SETTERS                         ///
@@ -86,7 +89,7 @@ contract Posterity is ERC20, Generations {
         address _from,
         address _to,
         uint256 _amount
-    ) internal virtual {
+    ) internal virtual returns (uint256 cost) {
         /// @dev Move the value in a cheaper access pattern.
         uint256 balance = balanceOf(_to);
 
@@ -117,7 +120,7 @@ contract Posterity is ERC20, Generations {
         /// @dev If the amount being transferred is the total balance, there is no cost to
         ///      expand the network (loss of knowledge) with complete passthrough of the transfer.
         /// @notice Accounts for the traditional forms of knowledge erosion that naturally occur.
-        uint256 cost = _amount == balance ? 0 : getKnowledgeErosion(_amount);
+        cost = _amount == balance ? 0 : getKnowledgeErosion(_amount);
 
         if (decay + cost > 0) {
             require(
@@ -143,7 +146,12 @@ contract Posterity is ERC20, Generations {
             _from,
             _amount == balance
                 ? 2
-                : getState(generationInterval, _from, balance, _amount + decay + cost)
+                : getState(
+                    generationInterval,
+                    _from,
+                    balance,
+                    _amount + decay + cost
+                )
         );
     }
 
@@ -185,8 +193,26 @@ contract Posterity is ERC20, Generations {
 
             /// @dev Handle the seeding of a new molecule.
             if (_amount == 1) {
+                /// @dev number of seconds of token emissions that are available to be purchased.
+                int256 secondsOfEmissionsAvaiable = int256(block.timestamp)
+                    .fromInt() - lastBirth;
+
+                /// @dev The number of seconds of emissions are being purchased.
+                int256 secondsOfEmissionsToPurchase = int256(_amount)
+                    .fromInt()
+                    .div(emissionRate);
+
+                /// @dev Ensure that the requested amount of seconds do not exceed the amount passed.
+                require(
+                    secondsOfEmissionsAvaiable >= secondsOfEmissionsToPurchase,
+                    "Posterity::_beforeTokenTransfer: Not enough emissions available to purchase."
+                );
+
                 /// @dev Mint the new knowledge and mind-share.
                 _mint(_to, getGenerationCapacity(generationInterval));
+
+                /// @dev Record the most recent time of birth.
+                lastBirth += secondsOfEmissionsToPurchase;
             }
         }
     }

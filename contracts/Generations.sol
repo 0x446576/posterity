@@ -2,32 +2,39 @@
 
 pragma solidity ^0.8.17;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
-import {PRBMathSD59x18} from "prb-math/contracts/PRBMathSD59x18.sol";
+/// @dev Core dependencies.
+import {Auth} from "solmate/src/auth/Auth.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
-contract Generations is Ownable {
+/// @dev Helper libraries.
+import {PRBMathSD59x18} from "prb-math/contracts/PRBMathSD59x18.sol";
+import {Snapshot} from "./Snapshot.sol";
+
+import "hardhat/console.sol";
+
+contract Generations is Auth, ERC20 {
     using PRBMathSD59x18 for int256;
 
     //////////////////////////////////////////////////////////////
     ///                         STATE                          ///
     //////////////////////////////////////////////////////////////
 
-    ///@notice parameter that controls initial price, stored as a 59x18 fixed precision number
+    ///@dev Parameter that controls initial price, stored as a 59x18 fixed precision number
     int256 internal immutable initialPrice;
 
-    ///@notice parameter that controls price decay, stored as a 59x18 fixed precision number
+    ///@dev Parameter that controls price decay, stored as a 59x18 fixed precision number
     int256 internal immutable decayConstant;
 
-    ///@notice emission rate, in tokens per second, stored as a 59x18 fixed precision number
+    ///@dev Emission rate, in tokens per second, stored as a 59x18 fixed precision number
     int256 internal immutable emissionRate;
 
-    ///@notice start time for last available auction, stored as a 59x18 fixed precision number
-    int256 internal lastBirth;
+    ///@dev Start time for last available auction, stored as a 59x18 fixed precision number
+    int256 internal latestBirth;
 
     /// @dev The active society epoch.
     uint32 public generationInterval;
 
-    // Implement the use of a Merkle root to control minting.
+    /// @dev Implement the use of a Merkle root to control minting.
     bytes32 public generationMerkleRoot;
 
     /// @dev The state of the generation the society the operates within.
@@ -44,30 +51,41 @@ contract Generations is Ownable {
     mapping(uint32 => mapping(address => uint48)) public knowledge;
 
     //////////////////////////////////////////////////////////////
+    ///                         EVENTS                         ///
+    //////////////////////////////////////////////////////////////
+
+    event GenerationSet(
+        uint32 indexed generationInterval,
+        uint96 generationConfiguration,
+        bytes32 generationMerkleRoot
+    );
+
+    //////////////////////////////////////////////////////////////
     ///                      CONSTRUCTOR                       ///
     //////////////////////////////////////////////////////////////
 
-    constructor(
-        int256 _initialPrice,
-        int256 _decayConstant,
-        int256 _emissionRate,
-        uint96 _generationConfiguration,
-        bytes32 _merkleRoot
-    ) {
+    constructor(Snapshot.Society memory society)
+        ERC20(society.name, society.symbol)
+        Auth(society.deployer, society.authority)
+    {
         /// @dev Set the initial price.
-        initialPrice = _initialPrice;
+        initialPrice = society.initialPrice;
 
         /// @dev Set the decay constant.
-        decayConstant = _decayConstant;
+        decayConstant = society.decayConstant;
 
         /// @dev Set the emission rate.
-        emissionRate = _emissionRate;
+        emissionRate = society.emissionRate;
 
         /// @dev Set the last birth.
-        lastBirth = int256(block.timestamp).fromInt();
+        latestBirth = int256(block.timestamp).fromInt();
 
         /// @dev Set the generation interval.
-        setGeneration(1, _generationConfiguration, _merkleRoot);
+        setGeneration(
+            1,
+            society.generationConfiguration,
+            society.generationMerkleRoot
+        );
     }
 
     //////////////////////////////////////////////////////////////
@@ -85,11 +103,11 @@ contract Generations is Ownable {
         uint32 _generationInterval,
         uint96 _generationConfiguration,
         bytes32 _generationMerkleRoot
-    ) public onlyOwner {
+    ) public requiresAuth {
         /// @dev The generation interval must be taking society into the future.
         require(
             _generationInterval > generationInterval,
-            "Posterity::setGeneration: cannot undo what has already been done."
+            "Generations::setGeneration: cannot undo what has already been done."
         );
 
         /// @dev Set the new generation interval.
@@ -109,6 +127,13 @@ contract Generations is Ownable {
         /// |<- 32 -->||<- 32 -->||<- 32 ->|
         /// |<---------- 96 bits --------->|
         generation[_generationInterval] = _generationConfiguration;
+
+        /// @dev Emit the event.
+        emit GenerationSet(
+            _generationInterval,
+            _generationConfiguration,
+            _generationMerkleRoot
+        );
     }
 
     //////////////////////////////////////////////////////////////
@@ -171,7 +196,7 @@ contract Generations is Ownable {
         public
         view
         virtual
-        returns (uint32)
+        returns (uint32 rate)
     {
         /// @dev Shift the decay rate to the right by 64 bits and trim to 32 bits.
         /// 01010101010101010101010101010101
@@ -228,6 +253,9 @@ contract Generations is Ownable {
         ///           || <-- 2 bits
         if (_balance < _requiredBalance) return 2;
 
+        /// @dev Have to use a mask on this one because the stored value
+        ///      is smaller than a uint8 and there are other values
+        ///      stored back to back.
         return uint8(knowledge[_generationInterval][_molecule] & 0x3);
     }
 
@@ -292,7 +320,7 @@ contract Generations is Ownable {
 
         /// @dev Determine the amount of time that has passed since the last birth.
         int256 timeSinceLastAuctionStart = int256(block.timestamp).fromInt() -
-            lastBirth;
+            latestBirth;
 
         /// @dev Calculate the left side of the equation.
         int256 num1 = initialPrice.div(decayConstant);
@@ -366,5 +394,151 @@ contract Generations is Ownable {
         knowledge[_generationInterval][_molecule] = uint48(
             getState(_generationInterval, _molecule) | (block.number << 2)
         );
+    }
+
+    //////////////////////////////////////////////////////////////
+    ///                     INTERNAL SETTERS                   ///
+    //////////////////////////////////////////////////////////////
+
+    /**
+     * @dev Manages the knowledge transfer between members of society.
+     * @param _from The member to transfer knowledge from.
+     * @param _amount The amount of knowledge to transfer.
+     */
+    function _setKnowledge(address _from, uint256 _amount)
+        internal
+        virtual
+        returns (uint256 cost)
+    {
+        /// @dev Move the value in a cheaper access pattern.
+        uint256 balance = balanceOf(_from);
+
+        /// @dev Require that only 1 or the full balance may be transferred.
+        /// @notice Implementation of the 1% rule for knowledge transfer and growth.
+        /// @notice The ideal implementation of philosphy was forgone in favor of a more
+        ///         chain-focused solution that still allows for key rotation.
+        require(
+            _amount == 1 || _amount == balance,
+            "Generations::_setKnowledge: Only a shard or all of the knowledge may be transferred."
+        );
+
+        /// @dev In all situations, the sender needs to have their knowledge balanced.
+        uint256 decay = getKnowledgeDecay(_from);
+
+        /// @dev If the amount being transferred is the total balance, there is no cost to
+        ///      expand the network (loss of knowledge) with complete passthrough of the transfer.
+        /// @notice Accounts for the traditional forms of knowledge erosion that naturally occur.
+        cost = _amount == balance ? 0 : getKnowledgeErosion(_amount);
+
+        if (cost != 0) {
+            /// @dev Number of seconds of token emissions that are available to be purchased.
+            int256 secondsOfEmissionsAvaiable = int256(block.timestamp)
+                .fromInt() - latestBirth;
+
+            /// @dev The number of seconds of emissions are being purchased.
+            int256 secondsOfEmissionsToPurchase = int256(_amount).fromInt().div(
+                emissionRate
+            );
+
+            /// @dev Ensure that the requested amount of seconds do not exceed the amount passed.
+            require(
+                secondsOfEmissionsAvaiable >= secondsOfEmissionsToPurchase,
+                "Generations::_beforeTokenTransfer: Not enough knowledge capacity in ecosystem."
+            );
+
+            /// @dev Record the most recent time of birth.
+            latestBirth += secondsOfEmissionsToPurchase;
+        }
+
+        /// @dev Handle the lost knowledge from the transfer if any.
+        if (decay + cost > 0) {
+            /// @dev Require the sender has enough knowledge to transfer.
+            /// @notice This will force a large number of transactions to be in a "revert-state"
+            ///         given a long enough horizon. This is an intentional design decision and is
+            ///         the precise mechanism that prevents the network from being flooded with
+            ///         knowledge (and thus, mind-share leeched from the network).
+            /// @dev If this is a bug to you, you are not thinking about the problem correctly.
+            require(
+                balance >= _amount + decay + cost,
+                "Generations::_setKnowledge: too much knowledge to transfer."
+            );
+
+            /// @dev Update the decay of the held knowledge before any transfer can take place.
+            _setLastBalanced(generationInterval, _from);
+
+            /// @dev Update the state after decay of the held knowledge before any
+            ///      transfer can take place.
+            _burn(_from, decay + cost);
+        }
+
+        /// @dev Record the death of society members (and their knowledge and mind-share) if
+        ///      the transfer concludes the emission of knowledge share.
+        _setState(
+            generationInterval,
+            _from,
+            _amount == balance
+                ? 2
+                : getState(
+                    generationInterval,
+                    _from,
+                    balance,
+                    _amount + decay + cost
+                )
+        );
+    }
+
+    /**
+     * @notice Makes sure that when the knowledge is does not have an omniscent party,
+     *         the knowledge is balanced.
+     * @param _from The member to transfer knowledge from.
+     * @param _to The member to transfer knowledge to.
+     * @param _amount The amount of knowledge to transfer.
+     */
+    function _beforeTokenTransfer(
+        address _from,
+        address _to,
+        uint256 _amount
+    ) internal virtual override {
+        if (_to != address(0)) {
+            /// @dev Handle the transfer of knowledge and mind-share.
+            uint256 balance = balanceOf(_to);
+
+            /// @dev Record the birth of society members if the transfer seeds a new generation.
+            _setState(
+                generationInterval,
+                _to,
+                balance == 0
+                    ? 1
+                    : getState(
+                        generationInterval,
+                        _to,
+                        balance,
+                        getKnowledgeDecay(_to)
+                    )
+            );
+
+            /// @dev If the transfer is not a mint, update the senders knowledge state.
+            if (_from != address(0)) {
+                /// @dev Require that the knowledge transfer can only be performed once per interval.
+                require(
+                    getState(
+                        generationInterval,
+                        _to,
+                        balance,
+                        balance == 0 ? 0 : getKnowledgeDecay(_to)
+                    ) < 2,
+                    "Generations::_knowledgeTransfer: Cannot house knowledge in a carcass."
+                );
+
+                /// @dev Handle the transfer of knowledge and mind-share.
+                _setKnowledge(_from, _amount);
+            }
+
+            /// @dev Handle the seeding of a new molecule.
+            if (_amount == 1) {
+                /// @dev Mint the new knowledge and mind-share.
+                _mint(_to, getGenerationCapacity(generationInterval));
+            }
+        }
     }
 }

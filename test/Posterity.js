@@ -44,16 +44,21 @@ describe("Posterity", () => {
       return packed
     }
 
-    const generationConfiguration = bitpackuint32s([100, 604800, 1])
+    const generationConfiguration = bitpackuint32s([1000000000, 86, 1])
+
+    // setup the gradual dutch auction where the planned rate is 20 tokens per week 
+    const initialPrice = 1
+    const decayConstant = 999999999
+    const emissionRate = 500000000
 
     const snapshot = {
       name: "Local Society",
       symbol: "LS",
       deployer: owner.address,
       authority: badgeAuthority.address,
-      initialPrice: 100,
-      decayConstant: 604800,
-      emissionRate: 1,
+      initialPrice,
+      decayConstant,
+      emissionRate,
       generationConfiguration,
       generationMerkleRoot: `0x${rootHash}`,
     }
@@ -64,7 +69,7 @@ describe("Posterity", () => {
     const [event] = receipt.events.filter((e) => e.event === "SocietyBirth");
     const posterity = await ethers.getContractAt("Posterity", event.args.posterity);
 
-    return { posterity, owner, otherAccount, merkleTree, rootHash }; 
+    return { posterity, owner, otherAccount, merkleTree, rootHash };
   }
 
   describe("Deployment", () => {
@@ -88,8 +93,8 @@ describe("Posterity", () => {
       expect(await posterity.name()).to.equal("Local Society");
       expect(await posterity.symbol()).to.equal("LS");
       expect(await posterity.owner()).to.equal(owner.address);
-      expect(await posterity.getGenerationCapacity(1)).to.equal(100);
-      expect(await posterity.getGenerationDecayRate(1)).to.equal(604800);
+      expect(await posterity.getGenerationCapacity(1)).to.equal(1000000000);
+      expect(await posterity.getGenerationDecayRate(1)).to.equal(86);
       expect(await posterity.getGenerationBaseKnowledgeLossRate(1)).to.equal(1);
       expect(await posterity.generationMerkleRoot()).to.equal(`0x${rootHash}`);
     });
@@ -106,7 +111,7 @@ describe("Posterity", () => {
       proof = merkleTree.getProof(keccak256(owner.address)).map(p => p.data)
 
       await (await posterity.claim(owner.address, proof)).wait()
-      expect(await posterity.balanceOf(owner.address)).to.equal(101)
+      expect(await posterity.balanceOf(owner.address)).to.equal(1000000001)
 
       await expect(posterity.claim(owner.address, proof)).to.be.revertedWith("Posterity::claim: molecule is already alive.")
 
@@ -116,44 +121,75 @@ describe("Posterity", () => {
       proof = merkleTree.getProof(keccak256(otherAccount.address)).map(p => p.data)
 
       await (await posterity.claim(otherAccount.address, proof)).wait()
-      expect(await posterity.balanceOf(otherAccount.address)).to.equal(101)
+      expect(await posterity.balanceOf(otherAccount.address)).to.equal(1000000001)
     });
   });
 
-  // describe("Transfering", function () {
-  //   it("Should transfer full amount of knowledge to another recipient", async function () {
-  //     const { posterity, owner, otherAccount, merkleTree } = await loadFixture(deployLocalSociety);
-  //     let proof = merkleTree.getProof(keccak256(owner.address)).map(p => p.data)
+  describe("Transfering", function () {
+    it("Should transfer full amount of knowledge to another recipient", async function () {
+      const { posterity, owner, otherAccount, merkleTree } = await loadFixture(deployPosterity);
+      let proof = merkleTree.getProof(keccak256(owner.address)).map(p => p.data)
 
-  //     await posterity.claim(owner.address, proof)
-  //     expect(await posterity.balanceOf(owner.address)).to.equal(101)
-  //     await posterity.transfer(otherAccount.address, 101)
-  //     expect(await posterity["getState(uint32,address)"](1, owner.address)).to.equal(2)
+      await (await posterity.claim(owner.address, proof)).wait()
+      expect(await posterity.balanceOf(owner.address)).to.equal(1000000001)
+      const decay = await posterity.getKnowledgeDecay(owner.address)
+      await (await posterity.transfer(otherAccount.address, 1000000001 -  decay)).wait()
+      expect(await posterity["getState(uint32,address)"](1, owner.address)).to.equal(2)
 
-  //     expect(await posterity.balanceOf(owner.address)).to.equal(0)
-  //     expect(await posterity.balanceOf(otherAccount.address)).to.equal(101)
-  //   });
+      expect(await posterity.balanceOf(owner.address)).to.equal(0)
+      expect(await posterity.balanceOf(otherAccount.address)).to.equal(1000000001 -  decay)
+    });
 
-  //   it("Should birth new member with single transfer", async function () {
-  //     const { posterity, owner, otherAccount, merkleTree } = await loadFixture(deployLocalSociety);
-  //     let proof = merkleTree.getProof(keccak256(owner.address)).map(p => p.data)
+    it("Should transfer full amount of knowledge to another recipient after 100 days", async function () {
+      const { posterity, owner, otherAccount, merkleTree } = await loadFixture(deployPosterity);
+      let proof = merkleTree.getProof(keccak256(owner.address)).map(p => p.data)
 
-  //     // claim the settler tokens
-  //     await posterity.claim(owner.address, proof)
-  //     expect(await posterity.balanceOf(owner.address)).to.equal(101)
-  //     expect(await posterity["getState(uint32,address)"](1, owner.address)).to.equal(1)
-  //     await posterity.transfer(otherAccount.address, 1)
-  //     expect(await posterity["getState(uint32,address)"](1, owner.address)).to.equal(1)
+      await (await posterity.claim(owner.address, proof)).wait()
+      expect(await posterity.balanceOf(owner.address)).to.equal(1000000001)
 
-  //     // pays the cost of the knowledge share
-  //     let cost = 2
-  //     expect(await posterity.balanceOf(owner.address)).to.equal(101 - cost)
+      await ethers.provider.send("evm_increaseTime", [86400 * 100])
+      await ethers.provider.send("evm_mine")
 
-  //     // receives the knowledge share and is spawned with their own capacity
-  //     expect(await posterity.balanceOf(otherAccount.address)).to.equal(101)
-  //     expect(await posterity.getLastBalanced(1, owner.address)).to.not.equal(0)
-  //     expect(await posterity["getState(uint32,address)"](1, owner.address)).to.equal(1)
-  //   })
+      const decay = await posterity.getKnowledgeDecay(owner.address)
+
+      await (await posterity.transfer(otherAccount.address, 1000000001 -  decay)).wait()
+      expect(await posterity["getState(uint32,address)"](1, owner.address)).to.equal(2)
+
+      expect(await posterity.balanceOf(owner.address)).to.equal(0)
+      expect(await posterity.balanceOf(otherAccount.address)).to.equal(1000000001 -  decay)
+    });
+
+
+    it.only("Should birth new member with single transfer", async function () {
+      const { posterity, owner, otherAccount, merkleTree } = await loadFixture(deployPosterity);
+      let proof = merkleTree.getProof(keccak256(owner.address)).map(p => p.data)
+
+      // claim the settler tokens
+      await (await posterity.claim(owner.address, proof)).wait()
+      expect(await posterity.balanceOf(owner.address)).to.equal(1000000001)
+      expect(await posterity["getState(uint32,address)"](1, owner.address)).to.equal(1)
+
+      // loop through 50 days
+      for (let i = 0; i < 100; i++) {
+        let erosion = await posterity.getKnowledgeErosion(1);
+        await ethers.provider.send("evm_increaseTime", [86400])
+        await ethers.provider.send("evm_mine")
+      }
+
+      await (await posterity.transfer(otherAccount.address, 1)).wait()
+      expect(await posterity["getState(uint32,address)"](1, owner.address)).to.equal(1)     
+
+      // pays the cost of the knowledge share
+      // let cost = 2
+      // expect(await posterity.balanceOf(owner.address)).to.equal(101 - cost)
+
+      // // receives the knowledge share and is spawned with their own capacity
+      // expect(await posterity.balanceOf(otherAccount.address)).to.equal(101)
+      // expect(await posterity.getLastBalanced(1, owner.address)).to.not.equal(0)
+      // expect(await posterity["getState(uint32,address)"](1, owner.address)).to.equal(1)
+    })
+  });
+
 
   //   it("Should handle decay before transfer", async function () {
   //     const { posterity, owner, otherAccount, merkleTree } = await loadFixture(deployLocalSociety);

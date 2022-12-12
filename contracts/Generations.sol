@@ -297,7 +297,7 @@ contract Generations is Auth, ERC20 {
         /// @dev Determine the amount of time that has passed since the last balance
         ///      and decay the knowledge accordingly.
         decay =
-            (block.number - getLastBalanced(generationInterval, _molecule)) /
+            (block.timestamp - getLastBalanced(generationInterval, _molecule)) /
             getGenerationDecayRate(generationInterval);
     }
 
@@ -392,7 +392,7 @@ contract Generations is Auth, ERC20 {
         /// 0101010101010101010101010101010111
         /// |<---------- 34 bits ----------->|
         knowledge[_generationInterval][_molecule] = uint48(
-            getState(_generationInterval, _molecule) | (block.number << 2)
+            getState(_generationInterval, _molecule) | (block.timestamp << 2)
         );
     }
 
@@ -413,24 +413,36 @@ contract Generations is Auth, ERC20 {
         /// @dev Move the value in a cheaper access pattern.
         uint256 balance = balanceOf(_from);
 
+        /// @dev In all situations, the sender needs to have their knowledge balanced.
+        uint256 decay = getKnowledgeDecay(_from);
+
+        require(
+            balance >= decay,
+            "Generations::_setKnowledge: The sender has perished."
+        );
+
+        /// @dev Calculate the remaining knowledge after the transfer.
+        uint256 remaining = balance - decay;
+
         /// @dev Require that only 1 or the full balance may be transferred.
         /// @notice Implementation of the 1% rule for knowledge transfer and growth.
         /// @notice The ideal implementation of philosphy was forgone in favor of a more
         ///         chain-focused solution that still allows for key rotation.
         require(
-            _amount == 1 || _amount == balance,
+            _amount == 1 || _amount == remaining,
             "Generations::_setKnowledge: Only a shard or all of the knowledge may be transferred."
         );
-
-        /// @dev In all situations, the sender needs to have their knowledge balanced.
-        uint256 decay = getKnowledgeDecay(_from);
 
         /// @dev If the amount being transferred is the total balance, there is no cost to
         ///      expand the network (loss of knowledge) with complete passthrough of the transfer.
         /// @notice Accounts for the traditional forms of knowledge erosion that naturally occur.
-        cost = _amount == balance ? 0 : getKnowledgeErosion(_amount);
+        cost = _amount == remaining ? 0 : getKnowledgeErosion(_amount);
+
+        console.log("cost", cost);    
 
         if (cost != 0) {
+            console.log("latestBirth", uint256(latestBirth));
+
             /// @dev Number of seconds of token emissions that are available to be purchased.
             int256 secondsOfEmissionsAvaiable = int256(block.timestamp)
                 .fromInt() - latestBirth;
@@ -438,6 +450,15 @@ contract Generations is Auth, ERC20 {
             /// @dev The number of seconds of emissions are being purchased.
             int256 secondsOfEmissionsToPurchase = int256(_amount).fromInt().div(
                 emissionRate
+            );
+
+            console.log(
+                "secondsOfEmissionsAvaiable",
+                uint256(secondsOfEmissionsAvaiable)
+            );
+            console.log(
+                "secondsOfEmissionsToPurchase",
+                uint256(secondsOfEmissionsToPurchase)
             );
 
             /// @dev Ensure that the requested amount of seconds do not exceed the amount passed.
@@ -448,6 +469,8 @@ contract Generations is Auth, ERC20 {
 
             /// @dev Record the most recent time of birth.
             latestBirth += secondsOfEmissionsToPurchase;
+
+            console.log("latestBirth", uint256(latestBirth));
         }
 
         /// @dev Handle the lost knowledge from the transfer if any.
@@ -459,8 +482,8 @@ contract Generations is Auth, ERC20 {
             ///         knowledge (and thus, mind-share leeched from the network).
             /// @dev If this is a bug to you, you are not thinking about the problem correctly.
             require(
-                balance >= _amount + decay + cost,
-                "Generations::_setKnowledge: too much knowledge to transfer."
+                remaining >= _amount + cost,
+                "Generations::_setKnowledge: Too much knowledge to transfer."
             );
 
             /// @dev Update the decay of the held knowledge before any transfer can take place.
@@ -476,7 +499,7 @@ contract Generations is Auth, ERC20 {
         _setState(
             generationInterval,
             _from,
-            _amount == balance
+            _amount == balance - decay
                 ? 2
                 : getState(
                     generationInterval,
@@ -499,6 +522,7 @@ contract Generations is Auth, ERC20 {
         address _to,
         uint256 _amount
     ) internal virtual override {
+        /// @dev If the transfer is a burn, don't run anything else.
         if (_to != address(0)) {
             /// @dev Handle the transfer of knowledge and mind-share.
             uint256 balance = balanceOf(_to);
